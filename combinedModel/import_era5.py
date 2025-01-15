@@ -52,3 +52,33 @@ def data_generation(data,
     regridded = regridded.isel(level=level)
     
     return regridded, sliced_era5
+
+
+def data_rescale(data, 
+            longitude_nodes=32, 
+            latitude_nodes=16,
+            level = [0, 10, 20, 30, 36]):
+
+
+    # Creating a new Grid object with custom parameters
+    custom_grid = Grid(
+        longitude_nodes= longitude_nodes,  # Number of grid points in longitude
+        latitude_nodes= latitude_nodes,   # Number of grid points in latitude
+    )
+
+    data_grid = spherical_harmonic.Grid(
+        latitude_nodes=data.sizes['latitude'],
+        longitude_nodes=data.sizes['longitude'],
+        latitude_spacing=xarray_utils.infer_latitude_spacing(data.latitude),
+        longitude_offset=xarray_utils.infer_longitude_offset(data.longitude),
+    )
+
+    regridder = horizontal_interpolation.ConservativeRegridder(
+        data_grid, custom_grid, skipna=True
+    )
+
+    regridded = xarray_utils.regrid(data, regridder)
+    regridded = xarray_utils.fill_nan_with_nearest(regridded)
+    regridded = regridded.isel(level=level)
+    
+    return regridded
