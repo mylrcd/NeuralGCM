@@ -1,7 +1,4 @@
 import torch
-print(torch.__version__)
-print(torch.version.cuda)
-print(torch.cuda.is_available())
 import numpy as np
 import pandas as pd
 import scipy.ndimage
@@ -132,13 +129,12 @@ def state_to_xarray(state):
 
   return ds
 
-def dynamical_core(encode, dt) :
+def dynamical_core(encode, dt, time_i) :
   data = encode.isel(longitude=slice(0, -1))
   last_lat = data['latitude'][-1].values
   new_lat = np.append(data['latitude'].values, last_lat + 0.1)
   extended_data = data.reindex(latitude=new_lat, method=None)
   data = extended_data.fillna(extended_data.isel(latitude=-2))
-
   # simulation grid
   layers = 32
   ref_temp_si = 250 * units.degK
@@ -168,7 +164,7 @@ def dynamical_core(encode, dt) :
 
   #orography
 
-  raw_orography = data.geopotential.isel(time=0, level=0).expand_dims(dim="level")
+  raw_orography = data.geopotential.isel(time = time_i, level=0).expand_dims(dim="level")
 
   desired_lon = 180/np.pi * model_coords.horizontal.nodal_axes[0]
   desired_lat = 180/np.pi * np.arcsin(model_coords.horizontal.nodal_axes[1])
@@ -261,8 +257,6 @@ def dynamical_core(encode, dt) :
 
 
 
-
-
   # temporal integration function
   inner_steps = int(save_every / dt_si)
   outer_steps = int(total_time / save_every)
@@ -281,17 +275,17 @@ def dynamical_core(encode, dt) :
 
     # build initial state
   tracers = {
-      'specific_cloud_water': data['specific_cloud_liquid_water_content'].isel(time=0),
-      'specific_cloud_ice': data['specific_cloud_ice_water_content'].isel(time=0),
-      'specific_humidity': data['specific_humidity'].isel(time=0),
+      'specific_cloud_water': data['specific_cloud_liquid_water_content'].isel(time=time_i), #
+      'specific_cloud_ice': data['specific_cloud_ice_water_content'].isel(time=time_i), #
+      'specific_humidity': data['specific_humidity'].isel(time=time_i), #
   }
 
 
   raw_init_state = primitive_equations.State(
-      vorticity = data['vorticity'].isel(time=0).data,
-      divergence = data['divergence'].isel(time=0).data,
-      temperature_variation=data['temperature_deviation'].isel(time=0).data,
-      log_surface_pressure=data['log_surface_pressure'].isel(time=0, level=0).expand_dims(dim="level").data,
+      vorticity = data['vorticity'].isel(time=time_i).data,
+      divergence = data['divergence'].isel(time=time_i).data,
+      temperature_variation=data['temperature_deviation'].isel(time=time_i).data,
+      log_surface_pressure=data['log_surface_pressure'].isel(time=time_i, level=0).expand_dims(dim="level").data,
       tracers={k: v.data for k, v in tracers.items()},
   )
 
@@ -305,3 +299,121 @@ def dynamical_core2(dfi, raw_init_state, integrate_fn):
   out_state, trajectory = jax.block_until_ready(integrate_fn(dfi_init_state))
 
   return out_state, trajectory
+
+
+def trajectory_to_xarray(trajectory, ds_init, model_coords, orography, physics_specs, save_every, outer_steps, output_level_indices):
+
+    # convert units back to SI
+    target_units = {k: v.data.units for k, v in ds_init.items()}
+    target_units |= {
+        'vorticity': units('1/s'),
+        'divergence': units('1/s'),
+        'geopotential': units('m^2/s^2'),
+        'vertical_velocity': units('1/s'),
+    }
+
+    ###################################################
+    target_units['surface_pressure'] = units('Pa')
+    ###################################################
+    target_units['specific_cloud_water'] = units('kg/kg')
+    ###################################################
+    target_units['specific_cloud_ice'] = units('kg/kg')
+    ###################################################
+
+    orography_nodal = jax.device_put(model_coords.horizontal.to_nodal(orography), device=jax.devices('cpu')[0])
+    trajectory_cpu = jax.device_put(trajectory, device=jax.devices('cpu')[0])
+
+    traj_nodal_si = {
+        k: physics_specs.dimensionalize(v, target_units[k]).magnitude
+        for k, v in trajectory_cpu.items()
+    }
+
+    # build xarray
+    times = float(save_every / units.hour) * np.arange(outer_steps)
+    lon = 180/np.pi * model_coords.horizontal.nodal_axes[0]
+    lat = 180/np.pi * np.arcsin(model_coords.horizontal.nodal_axes[1])
+
+    dims = ('time', 'sigma', 'longitude', 'latitude')
+    ds_result = xr.Dataset(
+        data_vars={
+            k: (dims, v) for k, v in traj_nodal_si.items() if k != 'surface_pressure'
+        },
+        coords={
+            'longitude': lon,
+            'latitude': lat,
+            'sigma': model_coords.vertical.centers[output_level_indices],
+            'time': times,
+            'orography': (('longitude', 'latitude'), orography_nodal.squeeze()),
+        },
+    ).assign(
+        surface_pressure=(
+            ('time', 'longitude', 'latitude'),
+            traj_nodal_si['surface_pressure'].squeeze(axis=-3),
+        )
+    )
+    return ds_result
+
+
+class DynamicalCoreRunner:
+    def __init__(self, regridded_encode, integration_steps, loop_iterations, time_i):
+        self.regridded_encode = regridded_encode
+        self.integration_steps = integration_steps
+        self.loop_iterations = loop_iterations
+        self.time_i = time_i
+
+        (
+            self.dfi,
+            self.raw_init_state,
+            self.integrate_fn,
+            self.model_coords,
+            self.ds_init,
+            self.orography,
+            self.physics_specs,
+            self.save_every,
+            self.outer_steps,
+            self.output_level_indices,
+        ) = dynamical_core(self.regridded_encode, self.integration_steps, self.time_i)
+        self.out_state, _ = dynamical_core2(self.dfi, self.raw_init_state, self.integrate_fn)
+        self.out_state = state_to_xarray_init(self.out_state)
+        self.ds_list = []
+
+    def run(self):
+        for _ in range(1, self.loop_iterations + 1):
+            tracers = {
+                'specific_cloud_water': self.out_state['specific_cloud_liquid_water_content'],
+                'specific_cloud_ice': self.out_state['specific_cloud_ice_water_content'],
+                'specific_humidity': self.out_state['specific_humidity'],
+            }
+
+            self.raw_init_state = primitive_equations.State(
+                vorticity=self.out_state['vorticity'].data,
+                divergence=self.out_state['divergence'].data,
+                temperature_variation=self.out_state['temperature_deviation'].data,
+                log_surface_pressure=self.out_state['log_surface_pressure'].data,
+                tracers={k: v.data for k, v in tracers.items()},
+            )
+            
+            self.out_state, trajectory = dynamical_core2(
+                self.dfi, self.raw_init_state, self.integrate_fn
+            )
+            self.out_state = state_to_xarray(self.out_state)
+            ds_out = trajectory_to_xarray(
+                trajectory,
+                self.ds_init,
+                self.model_coords,
+                self.orography,
+                self.physics_specs,
+                self.save_every,
+                self.outer_steps,
+                self.output_level_indices,
+            )
+            
+            self.ds_list.append(ds_out.sel(time=1, method='nearest'))
+
+        ds_final = xr.concat(self.ds_list, dim="time")
+        data = self.out_state.isel(latitude=slice(0, -1))
+        last_lat = data['longitude'][-1].values
+        new_lat = np.append(data['longitude'].values, last_lat + 0.1)
+        extended_data = data.reindex(longitude=new_lat, method=None)
+        self.out_state = extended_data.fillna(extended_data.isel(longitude=-2))
+        return self.out_state

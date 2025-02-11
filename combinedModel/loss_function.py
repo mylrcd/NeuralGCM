@@ -79,7 +79,7 @@ def spectral_bias_mse(field_pred, field_true, ltilde):
     field_pred, field_true : tenseurs de forme (batch, lead_time, ..., lat, lon)
     """
     # Moyenne sur les dimensions batch et lead_time (dimensions 0 et 1)
-    diff_mean = torch.mean(field_pred - field_true, dim=(0, 1))
+    diff_mean = torch.mean(field_pred - field_true) #, dim=(0, 1)
     # On compare ce biais moyen à zéro en termes d'énergie spectrale
     return spectral_mse(diff_mean, torch.zeros_like(diff_mean), ltilde)
 
@@ -116,11 +116,9 @@ def combined_loss(out_state, data_era5, ltilde=42):
         'divergence',
         'vorticity',
         'temperature_deviation',
-        'temperature',
         'specific_humidity',
         'specific_cloud_ice_water_content',
         'specific_cloud_liquid_water_content',
-        'log_surface_pressure'
     ]
 
     """# On ajoute log_surface_pressure s'il est présent
@@ -128,7 +126,7 @@ def combined_loss(out_state, data_era5, ltilde=42):
         variables.append('log_surface_pressure')"""
 
     # Calcul des pertes pour chaque variable
-    for var in variables:
+    for var in range(len(variables)):
         # Pertes sur la représentation "data" (ex. niveaux de pression)
         pred_data = out_state[var]   # forme : (batch, lead_time, level, lat, lon) #['data']
         true_data = data_era5[var]     # forme identique  #['data']
