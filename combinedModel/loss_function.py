@@ -126,7 +126,7 @@ def combined_loss(out_state, data_era5, ltilde=42):
         variables.append('log_surface_pressure')"""
 
     # Calcul des pertes pour chaque variable
-    for var in range(len(variables)):
+    for var in (variables):
         # Pertes sur la représentation "data" (ex. niveaux de pression)
         pred_data = out_state[var]   # forme : (batch, lead_time, level, lat, lon) #['data']
         true_data = data_era5[var]     # forme identique  #['data']

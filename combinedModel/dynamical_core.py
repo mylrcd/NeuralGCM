@@ -373,12 +373,22 @@ class DynamicalCoreRunner:
             self.outer_steps,
             self.output_level_indices,
         ) = dynamical_core(self.regridded_encode, self.integration_steps, self.time_i)
+        
         self.out_state, _ = dynamical_core2(self.dfi, self.raw_init_state, self.integrate_fn)
         self.out_state = state_to_xarray_init(self.out_state)
+        
+        data = self.out_state.isel(latitude=slice(0, -1))
+        last_lat = data['longitude'][-1].values
+        new_lat = np.append(data['longitude'].values, last_lat + 0.1)
+        extended_data = data.reindex(longitude=new_lat, method=None)
+        self.out_state_temp = extended_data.fillna(extended_data.isel(longitude=-2))
+
+        self.all_outstate = [self.out_state_temp]
         self.ds_list = []
 
+
     def run(self):
-        for _ in range(1, self.loop_iterations + 1):
+        for i in range(1, self.loop_iterations + 1):
             tracers = {
                 'specific_cloud_water': self.out_state['specific_cloud_liquid_water_content'],
                 'specific_cloud_ice': self.out_state['specific_cloud_ice_water_content'],
@@ -397,6 +407,15 @@ class DynamicalCoreRunner:
                 self.dfi, self.raw_init_state, self.integrate_fn
             )
             self.out_state = state_to_xarray(self.out_state)
+            
+            data = self.out_state.isel(latitude=slice(0, -1))
+            last_lat = data['longitude'][-1].values
+            new_lat = np.append(data['longitude'].values, last_lat + 0.1)
+            extended_data = data.reindex(longitude=new_lat, method=None)
+            self.out_state_temp = extended_data.fillna(extended_data.isel(longitude=-2))
+        
+            self.all_outstate.append(self.out_state_temp)
+            
             ds_out = trajectory_to_xarray(
                 trajectory,
                 self.ds_init,
@@ -408,12 +427,17 @@ class DynamicalCoreRunner:
                 self.output_level_indices,
             )
             
+
             self.ds_list.append(ds_out.sel(time=1, method='nearest'))
 
         ds_final = xr.concat(self.ds_list, dim="time")
-        data = self.out_state.isel(latitude=slice(0, -1))
+        
+        """ data = self.out_state.isel(latitude=slice(0, -1))
         last_lat = data['longitude'][-1].values
         new_lat = np.append(data['longitude'].values, last_lat + 0.1)
         extended_data = data.reindex(longitude=new_lat, method=None)
-        self.out_state = extended_data.fillna(extended_data.isel(longitude=-2))
-        return self.out_state
+        self.out_state = extended_data.fillna(extended_data.isel(longitude=-2)) """
+        
+        all_outstate_xr = xr.concat(self.all_outstate, dim="time")
+        
+        return all_outstate_xr
